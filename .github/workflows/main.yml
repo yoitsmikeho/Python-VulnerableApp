@@ -1,0 +1,113 @@
+name: "Python-VulnerableApp"
+on: 
+  workflow_dispatch:
+    inputs:
+      rt_python_remote_repo_id:
+        required: true
+        type: string
+        default: "mikeho-pypi-vulnapp-virtual"
+        description: "Artifactory Repository Name"
+      rt_docker_repo:
+        required: true
+        type: string
+        default: "mikeho-github-docker"
+        description: "Artifactory Docker repository"
+      docker_image_name:
+        required: true
+        type: string
+        default: "python-vulnerableapp"
+        description: "Docker Image name"
+      xr_enable_scan:
+        required: true
+        type: string
+        default: "true"
+        description: "Scan with Xray"
+      xr_override_fail_build:
+        required: true
+        type: string
+        default: "false"
+        description: "Set to false to ignore the fail build coming from Xray (exit code 3)"
+permissions:
+  actions: read           # for detecting the Github Actions environment
+  id-token: write         # for creating OIDC tokens for signing
+  packages: write         # for uploading attestations
+  contents: read          # read the contents permission
+  security-events: write  # for uploading code scanning
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_REPO: ${{ github.event.inputs.rt_docker_repo }}
+      IMAGE_NAME: ${{ github.event.inputs.docker_image_name }}
+    # Here we install all the tools : docker buildx, QEMU, JDK 11, JFrog CLI
+    steps:
+      - name: Print Inputs
+        run: echo "${{ toJSON(github.event.inputs) }}"
+        
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      #- name: Set up Docker Buildx
+      #  uses: docker/setup-buildx-action@v3
+        
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.6.8'
+      
+      - name: Setup JFrog CLI 
+        uses: jfrog/setup-jfrog-cli@v4
+        id: setup-cli
+        env:
+          JF_URL: https://${{ vars.JF_URL }}/
+          JF_PROJECT: ${{ vars.JF_PROJECT }}
+        with:
+            oidc-provider-name: mikeho-github
+            oidc-audience: mikeho-audience
+            version: latest
+
+      - name: Configure JFrog CLI for Python
+        run: |
+           jf pip-config --repo-resolve ${{ github.event.inputs.rt_python_remote_repo_id }}
+           jf pipenv-config --repo-resolve ${{ github.event.inputs.rt_python_remote_repo_id }}
+           jf pip install pipenv
+           jf pipenv install  
+           echo $VIRTUAL_ENV
+      
+      - name: JF Audit 
+        run: |
+          if [ ${{ github.event.inputs.xr_enable_scan }} == 'true' ]; then
+          	echo "Execute Xray scanning ..."
+          	jf audit --pipenv --fail=${{ github.event.inputs.xr_override_fail_build }} --project=${{ vars.JF_PROJECT }} --secrets --vuln --sast --sca
+          else
+          	echo "Skip Xray scanning!!!"
+          fi
+
+      #- name: Docker Authenticate
+      #  uses: docker/login-action@v3
+      #  with:
+      #    registry: ${{ vars.JF_URL }}
+      #    username: ${{ steps.setup-cli.outputs.oidc-user }}
+      #    password: ${{ steps.setup-cli.outputs.oidc-token }}
+
+      #- name: Docker Build and Push
+      #  uses: docker/build-push-action@v5
+      #  id: build
+      #  with:
+      #    push: true
+      #    tags: ${{ vars.JF_URL }}/${{ env.DOCKER_REPO }}/${{ env.IMAGE_NAME }}:${{ github.run_number }}
+      #    provenance: false
+      
+      #- name: Docker Add Package to Build
+      #  run: |  
+      #     echo "${{ vars.JF_URL }}/${{ env.DOCKER_REPO }}/${{ env.IMAGE_NAME }}:${{ github.run_number }}@${{ steps.build.outputs.digest }}" > metadata.json
+      #     jf rt build-docker-create ${{ env.DOCKER_REPO }} --image-file metadata.json --project=${{ vars.JF_PROJECT }}
+      
+      - name: Publish Build Info
+        run: |
+          jf rt build-collect-env --project=${{ vars.JF_PROJECT }}
+          jf rt build-add-git --project=${{ vars.JF_PROJECT }}
+          jf rt build-publish --project=${{ vars.JF_PROJECT }}
+      
+      - name: Build Scan
+        run: |            
+          jf build-scan --fail=${{ github.event.inputs.xr_override_fail_build }} --project=${{ vars.JF_PROJECT }} --vuln
